@@ -68,10 +68,12 @@ fsutil_rm (char **argv)
 
 /* Copies from the "scratch" disk, hdc or hd1:0 to file ARGV[1]
    in the file system.
+
    The current sector on the scratch disk must begin with the
    string "PUT\0" followed by a 32-bit little-endian integer
    indicating the file size in bytes.  Subsequent sectors hold
    the file content.
+
    The first call to this function will read starting at the
    beginning of the scratch disk.  Later calls advance across the
    disk.  This disk position is independent of that used for
@@ -131,10 +133,12 @@ fsutil_put (char **argv)
 }
 
 /* Copies file FILE_NAME from the file system to the scratch disk.
+
    The current sector on the scratch disk will receive "GET\0"
    followed by the file's size in bytes as a 32-bit,
    little-endian integer.  Subsequent sectors receive the file's
    data.
+
    The first call to this function will write starting at the
    beginning of the scratch disk.  Later calls advance across the
    disk.  This disk position is independent of that used for
