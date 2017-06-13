@@ -32,9 +32,9 @@ struct inode_disk
   {
     off_t length;                       /* File size in bytes. */
     bool dir;
-    disk_sector_t direct[DIRECT_BLOCK];
-    disk_sector_t indirect;
-    disk_sector_t double_indirect;
+  disk_sector_t direct[DIRECT_BLOCK];
+  disk_sector_t indirect;
+  disk_sector_t double_indirect;
     unsigned magic;                     /* Magic number. */
   };
 
@@ -55,6 +55,8 @@ struct inode
     bool removed;                       /* True if deleted, false otherwise. */
     int deny_write_cnt;                 /* 0: writes ok, >0: deny writes. */
   };
+
+static bool inode_make (disk_sector_t, off_t, bool);
 
 /* Returns the disk sector that contains byte offset POS within
    INODE.
@@ -139,26 +141,15 @@ inode_init (void)
 bool
 inode_create (disk_sector_t sector, off_t length)
 {
-  struct inode_disk *data;
-
-  ASSERT (length >= 0);
-
-  data = calloc (sizeof *data, 1);
-  data->length = length;
-  data->magic = INODE_MAGIC;
-  if (sector == 0)
-    {
-      ASSERT (free_map_allocate(1, &data->direct[0]));
-    }
-
-  lock_acquire (&inode_lock);
-  cache_create (sector);
-  cache_write (sector, data, 0, sizeof *data);
-  lock_release (&inode_lock);
-
-  free (data);
-  return true;
+  return inode_make (sector, length, false);
 }
+
+bool
+inode_create_dir (disk_sector_t sector, off_t length)
+{
+  return inode_make (sector, length, true);
+}
+
 
 /* Reads an inode from SECTOR
    and returns a `struct inode' that contains it.
@@ -440,4 +431,37 @@ inode_length (const struct inode *inode)
   off_t length;
   cache_read (inode->sector, &length, offsetof (struct inode_disk, length), sizeof length);
   return length;
+}
+
+bool
+inode_dir (const struct inode *inode)
+{
+  bool dir;
+  cache_read (inode->sector, &dir, offsetof (struct inode_disk, dir), sizeof dir);
+  return dir;
+}
+
+static bool
+inode_make (disk_sector_t sector, off_t length, bool dir)
+{
+  struct inode_disk *data;
+
+  ASSERT (length >= 0);
+
+  data = calloc (sizeof *data, 1);
+  data->length = length;
+  data->dir = dir;
+  data->magic = INODE_MAGIC;
+  if (sector == 0)
+    {
+      ASSERT (free_map_allocate(1, &data->direct[0]));
+    }
+
+  lock_acquire (&inode_lock);
+  cache_create (sector);
+  cache_write (sector, data, 0, sizeof *data);
+  lock_release (&inode_lock);
+
+  free (data);
+  return true;
 }

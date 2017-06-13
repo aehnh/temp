@@ -13,7 +13,10 @@ extern struct disk *filesys_disk;
 
 void filesys_init (bool format);
 void filesys_done (void);
+char *filesys_absolute (const char *name);
 bool filesys_create (const char *name, off_t initial_size);
+bool filesys_create_dir (const char *name);
+struct inode *filesys_open_inode (const char *name);
 struct file *filesys_open (const char *name);
 bool filesys_remove (const char *name);
 

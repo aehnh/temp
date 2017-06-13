@@ -7,11 +7,18 @@
 #include "filesys/inode.h"
 #include "filesys/directory.h"
 #include "devices/disk.h"
+#include "filesys/cache.h"
+#include "threads/thread.h"
+#include "threads/malloc.h"
 
 /* The disk that contains the file system. */
 struct disk *filesys_disk;
 
 static void do_format (void);
+static struct inode *filesys_open_from_dir (char **, struct dir *, int, int);
+static int token_num (char *);
+static char **tokenize_path (char *, int);
+static bool filesys_make (const char *, bool, off_t);
 
 /* Initializes the file system module.
    If FORMAT is true, reformats the file system. */
@@ -24,6 +31,7 @@ filesys_init (bool format)
 
   inode_init ();
   free_map_init ();
+  cache_init ();
 
   if (format) 
     do_format ();
@@ -38,6 +46,41 @@ filesys_done (void)
 {
   free_map_close ();
 }
+
+char *
+filesys_absolute (const char *name)
+{
+  int len, len1;
+  char *path, *dir;
+
+  if (name == NULL)
+    return NULL;
+
+  len = strlen(name);
+  if (len == 0)
+    return NULL;
+
+  if (name[0] == '/')
+    {
+      path = malloc (len + 2);
+      ASSERT (path != NULL);
+      strlcpy (path, name, len + 1);
+      path[len] = '/';
+      path[len + 1] = '\0';
+    }
+  else
+    {
+      dir = thread_current ()->dir;
+      len1 = strlen (dir);
+      path = malloc (len + len1 + 2);
+      ASSERT (path != NULL);
+      strlcpy (path, dir, len1 + 1);
+      strlcpy (path + len1, name, len + 1);
+      path[len + len1] = '/';
+      path[len + len1 + 1] = '\0';
+    }
+  return path;
+}
 
 /* Creates a file named NAME with the given INITIAL_SIZE.
    Returns true if successful, false otherwise.
@@ -46,17 +89,44 @@ filesys_done (void)
 bool
 filesys_create (const char *name, off_t initial_size) 
 {
-  disk_sector_t inode_sector = 0;
-  struct dir *dir = dir_open_root ();
-  bool success = (dir != NULL
-                  && free_map_allocate (1, &inode_sector)
-                  && inode_create (inode_sector, initial_size)
-                  && dir_add (dir, name, inode_sector));
-  if (!success && inode_sector != 0) 
-    free_map_release (inode_sector, 1);
+  return filesys_make (name, false, initial_size);
+}
+
+bool
+filesys_create_dir (const char *name)
+{
+  return filesys_make (name, true, 0);
+}
+
+struct inode *
+filesys_open_inode (const char *name)
+{
+  char **path_name;
+  char *path;
+  int count;
+  struct inode *inode;
+  struct dir *dir;
+
+  path = filesys_absolute (name);
+  if (path == NULL)
+    return NULL;
+
+  count = token_num (path);
+  inode = inode_open (ROOT_DIR_SECTOR);
+  if (count == 0)
+    {
+      free (path);
+      return inode;
+    }
+
+  path_name = tokenize_path (path, count);
+  dir = dir_open (inode);
+  inode = filesys_open_from_dir (path_name, dir, 0, count);
   dir_close (dir);
 
-  return success;
+  free (path);
+  free (path_name);
+  return inode;
 }
 
 /* Opens the file with the given NAME.
@@ -67,14 +137,11 @@ filesys_create (const char *name, off_t initial_size)
 struct file *
 filesys_open (const char *name)
 {
-  struct dir *dir = dir_open_root ();
-  struct inode *inode = NULL;
-
-  if (dir != NULL)
-    dir_lookup (dir, name, &inode);
-  dir_close (dir);
-
-  return file_open (inode);
+  struct inode *inode = filesys_open_inode (name);
+  if (inode == NULL || inode_dir (inode))
+    return NULL;
+  else
+    return file_open (inode);
 }
 
 /* Deletes the file named NAME.
@@ -84,12 +151,45 @@ filesys_open (const char *name)
 bool
 filesys_remove (const char *name) 
 {
-  struct dir *dir = dir_open_root ();
-  bool success = dir != NULL && dir_remove (dir, name);
-  dir_close (dir); 
+  char *path;
+  char **path_name;
+  int count;
+  struct dir *parent;
+  struct inode *inode;
 
+  path = filesys_absolute (name);
+  if (path == NULL)
+    return false;
+
+  count = token_num (path);
+  if (count == 0)
+    {
+      free (path);
+      return false;
+    }
+
+  path_name = tokenize_path (path, count);
+  parent = dir_open_root ();
+  if (count != 1)
+    {
+      inode = filesys_open_from_dir (path_name, parent, 0, count - 1);
+      dir_close (parent);
+      if (inode == NULL || !inode_dir (inode))
+        {
+          free (path);
+          free (path_name);
+          return false;
+        }
+      parent = dir_open (inode);
+    }
+
+  bool success = dir_remove (parent, path_name[count - 1]);
+  dir_close (parent); 
+  free (path_name);
+  free (path);
   return success;
 }
+
 
 /* Formats the file system. */
 static void
@@ -101,4 +201,122 @@ do_format (void)
     PANIC ("root directory creation failed");
   free_map_close ();
   printf ("done.\n");
+}
+
+
+static int
+token_num (char *path)
+{
+  int len, count;
+  char *path_, *token, *save_ptr;
+
+  len = strlen (path);
+  path_ = malloc (len + 1);
+  ASSERT (path_ != NULL);
+  strlcpy (path_, path, len + 1);
+
+  count = 0;
+  for (token = strtok_r (path_, "/", &save_ptr); token != NULL;
+    token = strtok_r (NULL, "/", &save_ptr))
+    count++;
+  free (path_);
+
+  return count;
+}
+
+static char ** 
+tokenize_path (char *path, int num)
+{
+  char **path_name;
+  char *token, *save_ptr;
+  int i;
+
+  path_name = malloc (sizeof (char *) * num);
+  ASSERT (path_name != NULL);
+
+  i = 0;
+  for (token = strtok_r (path, "/", &save_ptr); token != NULL;
+    token = strtok_r (NULL, "/", &save_ptr))
+    path_name[i++] = token;
+  
+  return path_name;
+}
+
+
+static struct inode *
+filesys_open_from_dir (char **path_name, struct dir *dir, int idx, int length)
+{
+  struct inode *inode, *result;
+  struct dir *dir_new;
+  char *name;
+
+  name = path_name[idx];
+  dir_lookup (dir, path_name[idx], &inode);
+  if (inode == NULL)
+    return NULL;
+
+  if (idx == length - 1)
+    return inode;
+
+  if (inode_dir (inode))
+    {
+      dir_new = dir_open (inode);
+      result = filesys_open_from_dir (path_name, dir_new, idx + 1, length);
+      dir_close (dir_new);
+      return result;
+    }
+
+  inode_close (inode);
+  return NULL;
+}
+
+static bool
+filesys_make (const char *name, bool dir, off_t initial_size)
+{
+  char **path_name;
+  char *path;
+  int count;
+  disk_sector_t sector;
+  struct dir *parent;
+  struct inode *inode;
+  bool success;
+
+  path = filesys_absolute (name);
+  if (path == NULL)
+    return false;
+
+  count = token_num (path);
+  if (count == 0)
+    {
+      free (path);
+      return false;
+    }
+
+  path_name = tokenize_path (path, count);
+  parent = dir_open_root ();
+  if (count != 1)
+    {
+      inode = filesys_open_from_dir (path_name, parent, 0, count - 1);
+      dir_close (parent);
+      if (inode == NULL || !inode_dir (inode))
+        {
+          free (path_name);
+          free (path);
+          return false;
+        }
+      parent = dir_open (inode);
+    }
+
+  ASSERT (free_map_allocate (1, &sector));
+  if (dir)
+    dir_create (sector, 16);
+  else 
+    inode_create (sector, initial_size);
+  success = dir_add (parent, path_name[count - 1], sector);
+  if (!success)
+    free_map_release (sector, 1);
+  dir_close (parent);
+  free (path_name);
+  free (path);
+  return success;
 }
