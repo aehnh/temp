@@ -96,8 +96,6 @@ cache_remove (disk_sector_t sector)
       free (c);
     }
   lock_release (&lock);
-
-  free (c);
 }
 
 static struct cache *

@@ -31,11 +31,11 @@
 struct inode_disk
   {
     off_t length;                       /* File size in bytes. */
-  disk_sector_t direct[DIRECT_BLOCK];
-  disk_sector_t indirect;
-  disk_sector_t double_indirect;
+    bool dir;
+    disk_sector_t direct[DIRECT_BLOCK];
+    disk_sector_t indirect;
+    disk_sector_t double_indirect;
     unsigned magic;                     /* Magic number. */
-    uint32_t unused[112];               /* Not used. */
   };
 
 /* Returns the number of sectors to allocate for an inode SIZE
@@ -139,14 +139,11 @@ inode_init (void)
 bool
 inode_create (disk_sector_t sector, off_t length)
 {
-  size_t size;
   struct inode_disk *data;
 
   ASSERT (length >= 0);
-  ASSERT (sizeof *data == DISK_SECTOR_SIZE);
 
-  size = (size_t) offsetof (struct inode_disk, unused);
-  data = calloc (size, 1);
+  data = calloc (sizeof *data, 1);
   data->length = length;
   data->magic = INODE_MAGIC;
   if (sector == 0)
@@ -156,7 +153,7 @@ inode_create (disk_sector_t sector, off_t length)
 
   lock_acquire (&inode_lock);
   cache_create (sector);
-  cache_write (sector, data, 0, size);
+  cache_write (sector, data, 0, sizeof *data);
   lock_release (&inode_lock);
 
   free (data);
@@ -243,11 +240,11 @@ inode_close (struct inode *inode)
         {
           single = SINGLE_BLOCK;
 
-          cache_data = calloc (offsetof (struct inode_disk, unused), 1);
+          cache_data = calloc (sizeof *data, 1);
           data = cache_data;
           ASSERT (cache_data != NULL);
 
-          cache_read (inode->sector, cache_data, 0, offsetof (struct inode_disk, unused));
+          cache_read (inode->sector, cache_data, 0, sizeof *data);
           cache_remove (inode->sector);
           free_map_release (inode->sector, 1);
 
@@ -379,10 +376,15 @@ inode_write_at (struct inode *inode, const void *buffer_, off_t size,
                 off_t offset) 
 {
   const uint8_t *buffer = buffer_;
-  off_t bytes_written = 0;
+  off_t bytes_written = 0, length;
 
   if (inode->deny_write_cnt)
     return 0;
+
+  length = inode_length (inode);
+  if (length < size + offset)
+    length = size + offset;
+  cache_write (inode->sector, &length, offsetof (struct inode_disk, length), sizeof (off_t));
 
   while (size > 0) 
     {
@@ -391,7 +393,7 @@ inode_write_at (struct inode *inode, const void *buffer_, off_t size,
       int sector_ofs = offset % DISK_SECTOR_SIZE;
 
       /* Bytes left in inode, bytes left in sector, lesser of the two. */
-      off_t inode_left = inode_length (inode) - offset;
+      off_t inode_left = length - offset;
       int sector_left = DISK_SECTOR_SIZE - sector_ofs;
       int min_left = inode_left < sector_left ? inode_left : sector_left;
 
@@ -436,6 +438,6 @@ off_t
 inode_length (const struct inode *inode)
 {
   off_t length;
-  cache_read (inode->sector, &length, 0, sizeof length);
+  cache_read (inode->sector, &length, offsetof (struct inode_disk, length), sizeof length);
   return length;
 }
